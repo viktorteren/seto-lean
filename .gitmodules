@@ -1,0 +1,3 @@
+[submodule "deps/Seto"]
+	path = deps/Seto
+	url = https://github.com/viktorteren/Seto.git

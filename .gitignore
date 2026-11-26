@@ -1,0 +1,7 @@
+output/
+*.html
+*.dot
+*.g
+__pycache__/
+*.pyc
+examples/formal-math/
