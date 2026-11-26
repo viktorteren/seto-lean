@@ -314,6 +314,10 @@ def render_html(proof: ParsedProof, lean_src: str, sms: list[dict], num_states: 
     svg {{ width: 100%; height: 100%; display: block; }}
     .tactic-node {{ cursor: pointer; }}
     .tactic-node:hover rect {{ filter: brightness(1.2); }}
+    .tactic-node.sync-selected rect {{ stroke: #fde047 !important; stroke-width: 3px !important; filter: drop-shadow(0 0 8px rgba(250, 204, 21, 0.75)); }}
+    .tactic-node.dimmed {{ opacity: 0.35; }}
+    .sync-banner {{ padding: 8px 16px; background: #1e293b; border-bottom: 1px solid var(--border); font-size: 13px; display: none; align-items: center; justify-content: space-between; gap: 12px; }}
+    .sync-banner.visible {{ display: flex; }}
     @media (max-width: 960px) {{ .layout {{ grid-template-columns: 1fr; height: auto; }} }}
   </style>
 </head>
@@ -337,6 +341,11 @@ def render_html(proof: ParsedProof, lean_src: str, sms: list[dict], num_states: 
   </div>
 </header>
 
+<div class="sync-banner" id="sync-banner">
+  <span id="sync-banner-text"></span>
+  <button class="btn" onclick="clearSyncHighlight()">Deseleziona</button>
+</div>
+
 <div class="layout">
   <div class="sm-pane" id="sm-pane"></div>
   <div class="code-pane" id="code-pane">{lean_lines_html}</div>
@@ -354,6 +363,36 @@ function highlightLine(ln) {{
     el.classList.add('active');
     el.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
   }}
+}}
+
+function clearSyncHighlight() {{
+  document.querySelectorAll('.tactic-node.sync-selected').forEach(el => el.classList.remove('sync-selected'));
+  document.querySelectorAll('.tactic-node.dimmed').forEach(el => el.classList.remove('dimmed'));
+  document.getElementById('sync-banner').classList.remove('visible');
+}}
+
+function selectEidAcrossSMs(eid, label, line) {{
+  highlightLine(line);
+  const allNodes = document.querySelectorAll('.tactic-node');
+  if (!eid) {{ clearSyncHighlight(); return; }}
+
+  const matchingSMs = new Set();
+  allNodes.forEach(el => {{
+    const eids = (el.dataset.eids || '').split(',').filter(Boolean);
+    const match = eids.includes(eid);
+    el.classList.toggle('sync-selected', match);
+    el.classList.toggle('dimmed', !match);
+    if (match && el.dataset.smIdx !== undefined) {{
+      matchingSMs.add(Number(el.dataset.smIdx) + 1);
+    }}
+  }});
+
+  const banner = document.getElementById('sync-banner');
+  const text = document.getElementById('sync-banner-text');
+  const smList = Array.from(matchingSMs).sort((a, b) => a - b).map(i => `SM #${{i}}`).join(', ');
+  const isShared = sharedSet.has(eid);
+  text.innerHTML = `${{isShared ? '<b>Sincronizzazione</b>' : 'Tattica'}}: <code>${{label}}</code> (Riga ${{line}}) → presente in <b>${{matchingSMs.size}}</b> grafi (${{smList}})`;
+  banner.classList.add('visible');
 }}
 
 function setCols(cols) {{
@@ -592,7 +631,12 @@ DATA.sms.forEach((rawSm, idx) => {{
       const lastLine = n.items[n.items.length - 1]?.line || firstLine;
       const g = document.createElementNS(svgNS, 'g');
       g.setAttribute('class', 'tactic-node');
-      g.addEventListener('click', ev => {{ ev.stopPropagation(); highlightLine(firstLine); }});
+      g.dataset.eids = n.items.map(it => it.eid).filter(Boolean).join(',');
+      g.dataset.smIdx = String(idx);
+      g.addEventListener('click', ev => {{
+        ev.stopPropagation();
+        selectEidAcrossSMs(n.items[0]?.eid || n.eid, n.items[0]?.label || '', firstLine);
+      }});
 
       const rect = document.createElementNS(svgNS, 'rect');
       rect.setAttribute('x', p.x - sz.w / 2); rect.setAttribute('y', p.y - sz.h / 2);
@@ -626,7 +670,10 @@ DATA.sms.forEach((rawSm, idx) => {{
         t.setAttribute('font-family', 'ui-monospace, Consolas, monospace');
         const txt = it.label.length > 34 ? it.label.slice(0, 33) + '…' : it.label;
         t.textContent = txt;
-        t.addEventListener('click', ev => {{ ev.stopPropagation(); highlightLine(it.line); }});
+        t.addEventListener('click', ev => {{
+          ev.stopPropagation();
+          selectEidAcrossSMs(it.eid, it.label, it.line);
+        }});
         g.appendChild(t);
       }});
       vp.appendChild(g);
