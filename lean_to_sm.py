@@ -294,17 +294,18 @@ def render_html(proof: ParsedProof, lean_src: str, sms: list[dict], num_states: 
     .stats {{ display: flex; gap: 12px; flex-wrap: wrap; }}
     .badge {{ background: var(--panel); border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px; font-size: 13px; color: var(--muted); }}
     .badge b {{ color: var(--text); }}
-    .layout {{ display: grid; grid-template-columns: 1.5fr 1fr; height: calc(100vh - 64px); }}
-    .sm-pane {{ overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }}
+    .layout {{ display: grid; grid-template-columns: 1.55fr 1fr; height: calc(100vh - 64px); }}
+    .sm-pane {{ overflow-y: auto; padding: 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; align-content: start; }}
+    .sm-pane.stacked {{ grid-template-columns: 1fr; }}
     .code-pane {{ overflow-y: auto; border-left: 1px solid var(--border); background: #0b1220; padding: 16px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.55; }}
-    .card {{ background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }}
+    .card {{ background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; }}
     .card-head {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 14px; font-weight: 600; gap: 8px; flex-wrap: wrap; }}
     .card-tools {{ display: flex; gap: 6px; align-items: center; }}
     .btn {{ background: #0f172a; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; font-size: 12px; cursor: pointer; }}
-    .btn:hover {{ border-color: var(--local); color: var(--local); }}
-    .svg-wrap {{ width: 100%; height: 380px; overflow: hidden; border: 1px solid #263244; border-radius: 8px; background: #0b1220; cursor: grab; position: relative; }}
+    .btn:hover, .btn.active {{ border-color: var(--local); color: var(--local); }}
+    .svg-wrap {{ width: 100%; height: 520px; overflow: hidden; border: 1px solid #263244; border-radius: 8px; background: #0b1220; cursor: grab; position: relative; }}
     .svg-wrap.grabbing {{ cursor: grabbing; }}
-    .card.expanded .svg-wrap {{ height: 75vh; }}
+    .card.expanded .svg-wrap {{ height: 78vh; }}
     .legend {{ display: flex; gap: 16px; font-size: 12px; color: var(--muted); align-items: center; }}
     .dot {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; }}
     .code-line {{ display: flex; gap: 12px; padding: 1px 6px; border-radius: 4px; white-space: pre; }}
@@ -331,6 +332,8 @@ def render_html(proof: ParsedProof, lean_src: str, sms: list[dict], num_states: 
     <span class="badge">Transizioni: <b>{num_edges}</b></span>
     <span class="badge">State Machines: <b>{len(sms)}</b></span>
     <span class="badge">Sincronizzazioni: <b>{len(shared_eids)}</b></span>
+    <button class="btn active" id="btn-cols" onclick="setCols(true)">Colonne affiancate</button>
+    <button class="btn" id="btn-stack" onclick="setCols(false)">Impilate</button>
   </div>
 </header>
 
@@ -353,7 +356,109 @@ function highlightLine(ln) {{
   }}
 }}
 
-function layoutSM(sm) {{
+function setCols(cols) {{
+  const p = document.getElementById('sm-pane');
+  p.classList.toggle('stacked', !cols);
+  document.getElementById('btn-cols').classList.toggle('active', cols);
+  document.getElementById('btn-stack').classList.toggle('active', !cols);
+}}
+
+/**
+ * 1) Contract 1-in/1-out intermediate places so consecutive tactics connect directly.
+ * 2) Merge consecutive linear non-branching tactics (with same shared/local status)
+ *    into vertical blocks so long proofs stay compact and readable top-down.
+ */
+function compactSM(sm) {{
+  const nodes = {{}};
+  Object.entries(sm.nodes).forEach(([k, v]) => {{
+    nodes[k] = {{ ...v, items: v.kind === 'tactic' ? [{{ label: v.label, line: v.line, eid: v.eid }}] : [] }};
+  }});
+  let edges = sm.edges.map(e => ({{ ...e }}));
+
+  const buildAdj = () => {{
+    const out = {{}}, inc = {{}};
+    Object.keys(nodes).forEach(k => {{ out[k] = []; inc[k] = []; }});
+    edges.forEach(e => {{
+      if (nodes[e.src] && nodes[e.dst]) {{
+        out[e.src].push(e.dst);
+        inc[e.dst].push(e.src);
+      }}
+    }});
+    return {{ out, inc }};
+  }};
+
+  // Step 1: bypass non-initial places with 1 in and 1 out
+  let changed = true;
+  while (changed) {{
+    changed = false;
+    const {{ out, inc }} = buildAdj();
+    for (const id of Object.keys(nodes)) {{
+      const n = nodes[id];
+      if (n.kind === 'place' && !n.initial && inc[id].length === 1 && out[id].length === 1) {{
+        const u = inc[id][0], v = out[id][0];
+        if (u !== id && v !== id) {{
+          edges = edges.filter(e => e.src !== id && e.dst !== id);
+          edges.push({{ src: u, dst: v }});
+          delete nodes[id];
+          changed = true;
+          break;
+        }}
+      }}
+    }}
+  }}
+
+  // Step 2: merge consecutive linear tactics of the same kind (local vs shared)
+  const isSpecial = (n) => {{
+    const lbl = n.items[0]?.label || '';
+    return lbl.startsWith('|') || lbl.startsWith('case ') || lbl.startsWith('qed:') || lbl.endsWith('by');
+  }};
+  changed = true;
+  while (changed) {{
+    changed = false;
+    const {{ out, inc }} = buildAdj();
+    for (const u of Object.keys(nodes)) {{
+      const nu = nodes[u];
+      if (nu.kind !== 'tactic' || out[u].length !== 1) continue;
+      const v = out[u][0];
+      const nv = nodes[v];
+      if (!nv || nv.kind !== 'tactic' || inc[v].length !== 1 || u === v) continue;
+      if (isSpecial(nu) || isSpecial(nv)) continue;
+      const su = sharedSet.has(nu.eid), sv = sharedSet.has(nv.eid);
+      if (su !== sv) continue;
+
+      // Merge v into u
+      nu.items.push(...nv.items);
+      edges = edges.filter(e => !(e.src === u && e.dst === v));
+      edges.forEach(e => {{ if (e.src === v) e.src = u; if (e.dst === v) e.dst = u; }});
+      delete nodes[v];
+      changed = true;
+      break;
+    }}
+  }}
+
+  // Deduplicate edges
+  const seenE = new Set();
+  edges = edges.filter(e => {{
+    const k = e.src + '->' + e.dst;
+    if (seenE.has(k) || e.src === e.dst) return false;
+    seenE.add(k);
+    return true;
+  }});
+
+  return {{ nodes, edges, initial: sm.initial.filter(id => nodes[id]) }};
+}}
+
+function nodeSize(n) {{
+  if (n.kind === 'place') return {{ w: 32, h: 32 }};
+  const count = n.items.length;
+  const shown = count <= 4 ? n.items : [...n.items.slice(0, 3), {{ label: `… +${{count - 3}} altre tattiche`, line: n.items[0].line }}];
+  const maxLen = Math.max(14, ...shown.map(it => Math.min(34, it.label.length)));
+  const w = Math.min(280, Math.max(150, maxLen * 6.8 + 26));
+  const h = 24 + shown.length * 16;
+  return {{ w, h, shown }};
+}}
+
+function layoutSMVertical(sm) {{
   const adj = {{}};
   Object.keys(sm.nodes).forEach(k => adj[k] = []);
   sm.edges.forEach(e => {{ if (adj[e.src]) adj[e.src].push(e.dst); }});
@@ -379,29 +484,51 @@ function layoutSM(sm) {{
     byLevel[lv].push(id);
   }});
 
-  const pos = {{}};
-  const colW = 190, rowH = 74;
-  let maxRow = 1;
-  Object.entries(byLevel).forEach(([lv, ids]) => {{
-    maxRow = Math.max(maxRow, ids.length);
-    ids.forEach((id, idx) => {{
-      pos[id] = {{ x: 60 + Number(lv) * colW, y: 46 + idx * rowH }};
-    }});
-  }});
+  const sizes = {{}};
+  Object.entries(sm.nodes).forEach(([id, n]) => {{ sizes[id] = nodeSize(n); }});
 
+  const pos = {{}};
+  let curY = 28;
+  let maxW = 360;
   const maxLv = Math.max(0, ...Object.keys(byLevel).map(Number));
-  return {{ pos, width: Math.max(520, (maxLv + 1) * colW + 80), height: Math.max(120, maxRow * rowH + 30) }};
+  for (let lv = 0; lv <= maxLv; lv++) {{
+    const ids = byLevel[lv] || [];
+    if (!ids.length) continue;
+    const rowMaxH = Math.max(...ids.map(id => sizes[id].h));
+    const totalRowW = ids.reduce((s, id) => s + sizes[id].w, 0) + Math.max(0, ids.length - 1) * 28;
+    maxW = Math.max(maxW, totalRowW + 60);
+    let curX = 30;
+    ids.forEach(id => {{
+      const sz = sizes[id];
+      pos[id] = {{ x: curX + sz.w / 2, y: curY + rowMaxH / 2, w: sz.w, h: sz.h }};
+      curX += sz.w + 28;
+    }});
+    curY += rowMaxH + 34;
+  }}
+  // Center rows horizontally
+  for (let lv = 0; lv <= maxLv; lv++) {{
+    const ids = byLevel[lv] || [];
+    if (!ids.length) continue;
+    const minX = Math.min(...ids.map(id => pos[id].x - pos[id].w / 2));
+    const maxX = Math.max(...ids.map(id => pos[id].x + pos[id].w / 2));
+    const shift = (maxW - (maxX - minX)) / 2 - minX;
+    ids.forEach(id => {{ pos[id].x += shift; }});
+  }}
+
+  return {{ pos, sizes, width: maxW, height: Math.max(180, curY + 20) }};
 }}
 
 const pane = document.getElementById('sm-pane');
-DATA.sms.forEach((sm, idx) => {{
+DATA.sms.forEach((rawSm, idx) => {{
+  const sm = compactSM(rawSm);
   const card = document.createElement('div');
   card.className = 'card';
-  const tacticCount = Object.values(sm.nodes).filter(n => n.kind === 'tactic').length;
+  const tacticCount = Object.values(rawSm.nodes).filter(n => n.kind === 'tactic').length;
+  const blockCount = Object.values(sm.nodes).filter(n => n.kind === 'tactic').length;
 
   const head = document.createElement('div');
   head.className = 'card-head';
-  head.innerHTML = `<span>State Machine #${{idx + 1}} <span class="badge">${{tacticCount}} tattiche</span></span>`;
+  head.innerHTML = `<span>State Machine #${{idx + 1}} <span class="badge">${{tacticCount}} tattiche · ${{blockCount}} blocchi</span></span>`;
   const tools = document.createElement('div');
   tools.className = 'card-tools';
   tools.innerHTML = `
@@ -417,7 +544,7 @@ DATA.sms.forEach((sm, idx) => {{
   const wrap = document.createElement('div');
   wrap.className = 'svg-wrap';
 
-  const {{ pos, width, height }} = layoutSM(sm);
+  const {{ pos, sizes, width, height }} = layoutSMVertical(sm);
   const svgNS = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(svgNS, 'svg');
   const vp = document.createElementNS(svgNS, 'g');
@@ -430,9 +557,11 @@ DATA.sms.forEach((sm, idx) => {{
   sm.edges.forEach(e => {{
     const a = pos[e.src], b = pos[e.dst];
     if (!a || !b) return;
+    const x1 = a.x, y1 = a.y + a.h / 2;
+    const x2 = b.x, y2 = b.y - b.h / 2;
+    const my = (y1 + y2) / 2;
     const line = document.createElementNS(svgNS, 'path');
-    const mx = (a.x + b.x) / 2;
-    line.setAttribute('d', `M ${{a.x}} ${{a.y}} C ${{mx}} ${{a.y}}, ${{mx}} ${{b.y}}, ${{b.x}} ${{b.y}}`);
+    line.setAttribute('d', `M ${{x1}} ${{y1}} C ${{x1}} ${{my}}, ${{x2}} ${{my}}, ${{x2}} ${{y2}}`);
     line.setAttribute('fill', 'none');
     line.setAttribute('stroke', '#64748b');
     line.setAttribute('stroke-width', '1.6');
@@ -442,46 +571,64 @@ DATA.sms.forEach((sm, idx) => {{
 
   Object.values(sm.nodes).forEach(n => {{
     const p = pos[n.id];
+    const sz = sizes[n.id];
     if (!p) return;
     if (n.kind === 'place') {{
       const g = document.createElementNS(svgNS, 'g');
       const c = document.createElementNS(svgNS, 'circle');
-      c.setAttribute('cx', p.x); c.setAttribute('cy', p.y); c.setAttribute('r', 14);
+      c.setAttribute('cx', p.x); c.setAttribute('cy', p.y); c.setAttribute('r', 15);
       c.setAttribute('fill', n.initial ? '#14532d' : '#0f172a');
       c.setAttribute('stroke', '#22c55e'); c.setAttribute('stroke-width', n.initial ? '3' : '2');
       g.appendChild(c);
       const t = document.createElementNS(svgNS, 'text');
       t.setAttribute('x', p.x); t.setAttribute('y', p.y + 4);
       t.setAttribute('text-anchor', 'middle'); t.setAttribute('fill', '#e2e8f0');
-      t.setAttribute('font-size', '10'); t.textContent = n.label;
+      t.setAttribute('font-size', '10'); t.textContent = n.initial ? 'Start' : n.label;
       g.appendChild(t);
       vp.appendChild(g);
     }} else {{
       const isShared = sharedSet.has(n.eid);
+      const firstLine = n.items[0]?.line || 0;
+      const lastLine = n.items[n.items.length - 1]?.line || firstLine;
       const g = document.createElementNS(svgNS, 'g');
       g.setAttribute('class', 'tactic-node');
-      g.addEventListener('click', ev => {{ ev.stopPropagation(); highlightLine(n.line); }});
+      g.addEventListener('click', ev => {{ ev.stopPropagation(); highlightLine(firstLine); }});
 
-      const textLabel = n.label.length > 22 ? n.label.slice(0, 21) + '…' : n.label;
-      const boxW = Math.max(96, textLabel.length * 6.8 + 16);
       const rect = document.createElementNS(svgNS, 'rect');
-      rect.setAttribute('x', p.x - boxW / 2); rect.setAttribute('y', p.y - 14);
-      rect.setAttribute('width', boxW); rect.setAttribute('height', 28);
-      rect.setAttribute('rx', 6);
+      rect.setAttribute('x', p.x - sz.w / 2); rect.setAttribute('y', p.y - sz.h / 2);
+      rect.setAttribute('width', sz.w); rect.setAttribute('height', sz.h);
+      rect.setAttribute('rx', 8);
       rect.setAttribute('fill', isShared ? '#451a03' : '#0c4a6e');
       rect.setAttribute('stroke', isShared ? '#f59e0b' : '#38bdf8');
       rect.setAttribute('stroke-width', '1.6');
       g.appendChild(rect);
 
       const title = document.createElementNS(svgNS, 'title');
-      title.textContent = `Riga ${{n.line}}: ${{n.label}}`;
+      title.textContent = n.items.map(it => `L${{it.line}}: ${{it.label}}`).join('\\n');
       g.appendChild(title);
 
-      const t = document.createElementNS(svgNS, 'text');
-      t.setAttribute('x', p.x); t.setAttribute('y', p.y + 4);
-      t.setAttribute('text-anchor', 'middle'); t.setAttribute('fill', '#f8fafc');
-      t.setAttribute('font-size', '11'); t.textContent = textLabel;
-      g.appendChild(t);
+      // Header line range inside block
+      const hdr = document.createElementNS(svgNS, 'text');
+      hdr.setAttribute('x', p.x - sz.w / 2 + 10);
+      hdr.setAttribute('y', p.y - sz.h / 2 + 14);
+      hdr.setAttribute('fill', isShared ? '#fbbf24' : '#7dd3fc');
+      hdr.setAttribute('font-size', '10');
+      hdr.setAttribute('font-weight', '600');
+      hdr.textContent = n.items.length > 1 ? `L${{firstLine}}–${{lastLine}} · ${{n.items.length}} passi` : `L${{firstLine}}`;
+      g.appendChild(hdr);
+
+      sz.shown.forEach((it, k) => {{
+        const t = document.createElementNS(svgNS, 'text');
+        t.setAttribute('x', p.x - sz.w / 2 + 10);
+        t.setAttribute('y', p.y - sz.h / 2 + 30 + k * 16);
+        t.setAttribute('fill', '#f8fafc');
+        t.setAttribute('font-size', '11');
+        t.setAttribute('font-family', 'ui-monospace, Consolas, monospace');
+        const txt = it.label.length > 34 ? it.label.slice(0, 33) + '…' : it.label;
+        t.textContent = txt;
+        t.addEventListener('click', ev => {{ ev.stopPropagation(); highlightLine(it.line); }});
+        g.appendChild(t);
+      }});
       vp.appendChild(g);
     }}
   }});
