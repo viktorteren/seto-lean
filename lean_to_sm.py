@@ -298,13 +298,19 @@ def render_html(proof: ParsedProof, lean_src: str, sms: list[dict], num_states: 
     .sm-pane {{ overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }}
     .code-pane {{ overflow-y: auto; border-left: 1px solid var(--border); background: #0b1220; padding: 16px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.55; }}
     .card {{ background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }}
-    .card-head {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 14px; font-weight: 600; }}
+    .card-head {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 14px; font-weight: 600; gap: 8px; flex-wrap: wrap; }}
+    .card-tools {{ display: flex; gap: 6px; align-items: center; }}
+    .btn {{ background: #0f172a; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; font-size: 12px; cursor: pointer; }}
+    .btn:hover {{ border-color: var(--local); color: var(--local); }}
+    .svg-wrap {{ width: 100%; height: 380px; overflow: hidden; border: 1px solid #263244; border-radius: 8px; background: #0b1220; cursor: grab; position: relative; }}
+    .svg-wrap.grabbing {{ cursor: grabbing; }}
+    .card.expanded .svg-wrap {{ height: 75vh; }}
     .legend {{ display: flex; gap: 16px; font-size: 12px; color: var(--muted); align-items: center; }}
     .dot {{ width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; }}
     .code-line {{ display: flex; gap: 12px; padding: 1px 6px; border-radius: 4px; white-space: pre; }}
     .code-line.active {{ background: rgba(56, 189, 248, 0.22); outline: 1px solid var(--local); }}
     .ln {{ color: #64748b; user-select: none; }}
-    svg {{ width: 100%; overflow: visible; }}
+    svg {{ width: 100%; height: 100%; display: block; }}
     .tactic-node {{ cursor: pointer; }}
     .tactic-node:hover rect {{ filter: brightness(1.2); }}
     @media (max-width: 960px) {{ .layout {{ grid-template-columns: 1fr; height: auto; }} }}
@@ -392,17 +398,34 @@ DATA.sms.forEach((sm, idx) => {{
   const card = document.createElement('div');
   card.className = 'card';
   const tacticCount = Object.values(sm.nodes).filter(n => n.kind === 'tactic').length;
-  card.innerHTML = `<div class="card-head"><span>State Machine #${{idx + 1}}</span><span class="badge">${{tacticCount}} tattiche</span></div>`;
+
+  const head = document.createElement('div');
+  head.className = 'card-head';
+  head.innerHTML = `<span>State Machine #${{idx + 1}} <span class="badge">${{tacticCount}} tattiche</span></span>`;
+  const tools = document.createElement('div');
+  tools.className = 'card-tools';
+  tools.innerHTML = `
+    <button class="btn" data-act="in" title="Zoom in">+</button>
+    <button class="btn" data-act="out" title="Zoom out">−</button>
+    <button class="btn" data-act="fit" title="Adatta alla vista">Fit</button>
+    <button class="btn" data-act="reset" title="Scala 1:1">100%</button>
+    <button class="btn" data-act="expand" title="Espandi">⛶</button>
+  `;
+  head.appendChild(tools);
+  card.appendChild(head);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'svg-wrap';
 
   const {{ pos, width, height }} = layoutSM(sm);
   const svgNS = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(svgNS, 'svg');
-  svg.setAttribute('viewBox', `0 0 ${{width}} ${{height}}`);
-  svg.setAttribute('height', height);
+  const vp = document.createElementNS(svgNS, 'g');
 
   const defs = document.createElementNS(svgNS, 'defs');
   defs.innerHTML = `<marker id="arrow-${{idx}}" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L7,3 z" fill="#64748b"/></marker>`;
   svg.appendChild(defs);
+  svg.appendChild(vp);
 
   sm.edges.forEach(e => {{
     const a = pos[e.src], b = pos[e.dst];
@@ -414,7 +437,7 @@ DATA.sms.forEach((sm, idx) => {{
     line.setAttribute('stroke', '#64748b');
     line.setAttribute('stroke-width', '1.6');
     line.setAttribute('marker-end', `url(#arrow-${{idx}})`);
-    svg.appendChild(line);
+    vp.appendChild(line);
   }});
 
   Object.values(sm.nodes).forEach(n => {{
@@ -432,12 +455,12 @@ DATA.sms.forEach((sm, idx) => {{
       t.setAttribute('text-anchor', 'middle'); t.setAttribute('fill', '#e2e8f0');
       t.setAttribute('font-size', '10'); t.textContent = n.label;
       g.appendChild(t);
-      svg.appendChild(g);
+      vp.appendChild(g);
     }} else {{
       const isShared = sharedSet.has(n.eid);
       const g = document.createElementNS(svgNS, 'g');
       g.setAttribute('class', 'tactic-node');
-      g.onclick = () => highlightLine(n.line);
+      g.addEventListener('click', ev => {{ ev.stopPropagation(); highlightLine(n.line); }});
 
       const textLabel = n.label.length > 22 ? n.label.slice(0, 21) + '…' : n.label;
       const boxW = Math.max(96, textLabel.length * 6.8 + 16);
@@ -459,12 +482,77 @@ DATA.sms.forEach((sm, idx) => {{
       t.setAttribute('text-anchor', 'middle'); t.setAttribute('fill', '#f8fafc');
       t.setAttribute('font-size', '11'); t.textContent = textLabel;
       g.appendChild(t);
-      svg.appendChild(g);
+      vp.appendChild(g);
     }}
   }});
 
-  card.appendChild(svg);
+  wrap.appendChild(svg);
+  card.appendChild(wrap);
   pane.appendChild(card);
+
+  // Pan & Zoom state
+  let scale = 1, tx = 16, ty = 16;
+  const apply = () => vp.setAttribute('transform', `translate(${{tx}},${{ty}}) scale(${{scale}})`);
+  const fitView = () => {{
+    const r = wrap.getBoundingClientRect();
+    const sx = (r.width - 24) / width;
+    const sy = (r.height - 24) / height;
+    scale = Math.max(0.08, Math.min(1.2, Math.min(sx, sy)));
+    tx = 12;
+    ty = Math.max(12, (r.height - height * scale) / 2);
+    apply();
+  }};
+  requestAnimationFrame(fitView);
+
+  wrap.addEventListener('wheel', e => {{
+    e.preventDefault();
+    const r = wrap.getBoundingClientRect();
+    const mx = e.clientX - r.left;
+    const my = e.clientY - r.top;
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const next = Math.max(0.05, Math.min(6, scale * factor));
+    tx = mx - (mx - tx) * (next / scale);
+    ty = my - (my - ty) * (next / scale);
+    scale = next;
+    apply();
+  }}, {{ passive: false }});
+
+  let dragging = false, lx = 0, ly = 0;
+  wrap.addEventListener('mousedown', e => {{
+    dragging = true; lx = e.clientX; ly = e.clientY;
+    wrap.classList.add('grabbing');
+  }});
+  window.addEventListener('mousemove', e => {{
+    if (!dragging) return;
+    tx += e.clientX - lx; ty += e.clientY - ly;
+    lx = e.clientX; ly = e.clientY;
+    apply();
+  }});
+  window.addEventListener('mouseup', () => {{
+    if (dragging) {{ dragging = false; wrap.classList.remove('grabbing'); }}
+  }});
+
+  tools.addEventListener('click', e => {{
+    const act = e.target?.dataset?.act;
+    if (!act) return;
+    const r = wrap.getBoundingClientRect();
+    const cx = r.width / 2, cy = r.height / 2;
+    if (act === 'in' || act === 'out') {{
+      const factor = act === 'in' ? 1.25 : 0.8;
+      const next = Math.max(0.05, Math.min(6, scale * factor));
+      tx = cx - (cx - tx) * (next / scale);
+      ty = cy - (cy - ty) * (next / scale);
+      scale = next;
+      apply();
+    }} else if (act === 'fit') {{
+      fitView();
+    }} else if (act === 'reset') {{
+      scale = 1; tx = 16; ty = 16; apply();
+    }} else if (act === 'expand') {{
+      card.classList.toggle('expanded');
+      requestAnimationFrame(fitView);
+    }}
+  }});
 }});
 </script>
 </body>
